@@ -1,29 +1,184 @@
 //@version=5
-strategy("Simple Strategy Template", overlay=true, margin_long=100, margin_short=100)
+strategy("ICT/SMC FVG Strategy", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=2, currency=currency.USD)
 
-// Input parameters
-fastLength = input.int(14, minval=1, title="Fast Length")
-slowLength = input.int(28, minval=1, title="Slow Length")
+// =============================================================================
+// INPUTS
+// =============================================================================
+grp_structure = "Market Structure"
+pivotLookup   = input.int(5, "Pivot Lookback", minval=1, group=grp_structure, tooltip="Number of bars to look back/forward for pivots")
 
-// Calculate Moving Averages
-fastMA = ta.sma(close, fastLength)
-slowMA = ta.sma(close, slowLength)
+grp_risk      = "Risk Management"
+rr_ratio      = input.float(2.0, "Risk:Reward Ratio", minval=0.1, step=0.1, group=grp_risk)
 
-// Plot Moving Averages
-plot(fastMA, color=color.blue, title="Fast SMA")
-plot(slowMA, color=color.orange, title="Slow SMA")
+grp_visuals   = "Visuals"
+show_fvg      = input.bool(true, "Show FVGs", group=grp_visuals)
+show_targets  = input.bool(true, "Show TP/SL Targets", group=grp_visuals)
+col_bull      = input.color(color.new(color.green, 80), "Bullish Color", group=grp_visuals)
+col_bear      = input.color(color.new(color.red, 80), "Bearish Color", group=grp_visuals)
 
-// Trading Logic
-longCondition = ta.crossover(fastMA, slowMA)
-shortCondition = ta.crossunder(fastMA, slowMA)
+// =============================================================================
+// MARKET STRUCTURE & BOS
+// =============================================================================
+// Detect pivots
+ph = ta.pivothigh(high, pivotLookup, pivotLookup)
+pl = ta.pivotlow(low, pivotLookup, pivotLookup)
 
-// Execute Strategy
-if (longCondition)
+// Structure variables
+var float last_ph = na
+var float last_pl = na
+var int trend = 0 // 1 = Bullish, -1 = Bearish
+
+// Update Swing Points
+if not na(ph)
+    last_ph := ph
+if not na(pl)
+    last_pl := pl
+
+// Break of Structure (BOS)
+// We look for a close crossing the last structural point
+bos_bull = trend != 1 and close > last_ph and not na(last_ph)
+bos_bear = trend != -1 and close < last_pl and not na(last_pl)
+
+if bos_bull
+    trend := 1
+if bos_bear
+    trend := -1
+
+// Plot Structure (Optional Debugging)
+// plot(last_ph, color=color.green, style=plot.style_circles, offset=-pivotLookup)
+// plot(last_pl, color=color.red, style=plot.style_circles, offset=-pivotLookup)
+
+// =============================================================================
+// FAIR VALUE GAPS (FVG)
+// =============================================================================
+// Bullish FVG: Candle 1 High < Candle 3 Low
+// Bearish FVG: Candle 1 Low > Candle 3 High
+// Index 0 is current, 1 is previous, 2 is 2 bars ago.
+// FVG happens on the close of bar 0 (confirming the 3-bar formation)
+
+is_bull_fvg = low > high[2]
+is_bear_fvg = high < low[2]
+
+// We need to store the *most recent* FVG that matches our trend
+// to wait for a retest.
+var float active_fvg_top = na
+var float active_fvg_bot = na
+var int active_fvg_type = 0 // 1 = Bull, -1 = Bear
+var int active_fvg_index = 0
+
+// Update FVG if we have a new one aligned with trend
+// Note: Simplicity - we take the freshest FVG after a BOS or during the trend
+if trend == 1 and is_bull_fvg
+    active_fvg_top := low    // The gap top is the low of the current candle (candle 3) ? No.
+    // Definition:
+    // Bullish FVG is the gap between High[2] and Low[0].
+    // Top of gap = Low[0]
+    // Bottom of gap = High[2]
+    active_fvg_top := low
+    active_fvg_bot := high[2]
+    active_fvg_type := 1
+    active_fvg_index := bar_index
+
+if trend == -1 and is_bear_fvg
+    // Bearish FVG is gap between Low[2] and High[0]
+    // Top of gap = Low[2]
+    // Bottom of gap = High[0]
+    active_fvg_top := low[2]
+    active_fvg_bot := high
+    active_fvg_type := -1
+    active_fvg_index := bar_index
+
+// Visualizing FVGs
+if show_fvg and active_fvg_type != 0
+    // Draw a box for the active FVG?
+    // Since Pine Script boxes persist, we usually delete old ones or just draw new ones.
+    // For simplicity in a strategy, we can use `box.new` with automatic deletion or `line`.
+    // However, `plot` is hard for variable levels. `box` is better.
+    // We will draw a box only when a NEW active FVG is formed to avoid clutter,
+    // or extend the current one.
+    // Let's just create a box for every detected FVG for visualization purposes
+    // (User wanted to "show buy/sell labels" and "prediction", FVG boxes are standard SMC).
+    if (trend == 1 and is_bull_fvg)
+        // Bull FVG: Bottom=high[2], Top=low[0]
+        box.new(bar_index[2], low, bar_index, high[2], border_color=col_bull, bgcolor=col_bull)
+    if (trend == -1 and is_bear_fvg)
+        // Bear FVG: Top=low[2], Bottom=high[0]
+        box.new(bar_index[2], low[2], bar_index, high, border_color=col_bear, bgcolor=col_bear)
+
+// =============================================================================
+// ENTRY LOGIC (FVG RETEST)
+// =============================================================================
+// We enter when price touches the active FVG area.
+// We must not be in a position already (strategy.position_size == 0)
+
+// Helper for SL calculation
+var float entry_sl = na
+var float entry_tp = na
+
+// Reset FVG if invalidated (price goes through it)
+// Bullish FVG invalidated if close < bottom
+if active_fvg_type == 1 and close < active_fvg_bot
+    active_fvg_type := 0
+// Bearish FVG invalidated if close > top
+if active_fvg_type == -1 and close > active_fvg_top
+    active_fvg_type := 0
+
+longCondition = false
+shortCondition = false
+
+// Check Retest
+// Ensure we are not on the same bar that formed the FVG (bar_index > active_fvg_index)
+if strategy.position_size == 0 and bar_index > active_fvg_index
+    if active_fvg_type == 1 and low <= active_fvg_top and close >= active_fvg_bot // Price dipped into gap
+        longCondition := true
+        // Set SL at recent Pivot Low or just below FVG.
+        // Robustness: Use the recent pivot low we tracked.
+        entry_sl := not na(last_pl) ? last_pl : active_fvg_bot
+        // Calculate TP
+        risk = close - entry_sl
+        entry_tp := close + (risk * rr_ratio)
+
+    if active_fvg_type == -1 and high >= active_fvg_bot and close <= active_fvg_top // Price spiked into gap
+        shortCondition := true
+        // Set SL at recent Pivot High
+        entry_sl := not na(last_ph) ? last_ph : active_fvg_top
+        risk = entry_sl - close
+        entry_tp := close - (risk * rr_ratio)
+
+// Execute
+if longCondition
     strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long", "Long", stop=entry_sl, limit=entry_tp)
+    active_fvg_type := 0 // Consume the FVG (don't re-enter immediately)
 
-if (shortCondition)
+if shortCondition
     strategy.entry("Short", strategy.short)
+    strategy.exit("Exit Short", "Short", stop=entry_sl, limit=entry_tp)
+    active_fvg_type := 0
 
-// Visuals: Buy/Sell Labels
-plotshape(longCondition, title="Buy Label", text="BUY", style=shape.labelup, location=location.belowbar, color=color.green, textcolor=color.white, size=size.tiny)
-plotshape(shortCondition, title="Sell Label", text="SELL", style=shape.labeldown, location=location.abovebar, color=color.red, textcolor=color.white, size=size.tiny)
+// =============================================================================
+// VISUALS: LABELS & PREDICTION INDICATOR
+// =============================================================================
+// Buy/Sell Labels
+plotshape(longCondition, title="Buy Signal", text="BUY", style=shape.labelup, location=location.belowbar, color=color.green, textcolor=color.white, size=size.small)
+plotshape(shortCondition, title="Sell Signal", text="SELL", style=shape.labeldown, location=location.abovebar, color=color.red, textcolor=color.white, size=size.small)
+
+// Prediction Lines (TP/SL Projection)
+// We use `line.new` to draw the projection when a trade occurs.
+if show_targets
+    if longCondition
+        // Draw Entry Line
+        line.new(bar_index, close, bar_index + 10, close, color=color.gray, style=line.style_dotted)
+        // Draw SL Line
+        line.new(bar_index, entry_sl, bar_index + 10, entry_sl, color=color.red, style=line.style_solid, width=2)
+        // Draw TP Line
+        line.new(bar_index, entry_tp, bar_index + 10, entry_tp, color=color.green, style=line.style_solid, width=2)
+        // Draw Arrow
+        line.new(bar_index, close, bar_index + 5, entry_tp, color=color.green, style=line.style_arrow_right)
+
+    if shortCondition
+        line.new(bar_index, close, bar_index + 10, close, color=color.gray, style=line.style_dotted)
+        line.new(bar_index, entry_sl, bar_index + 10, entry_sl, color=color.red, style=line.style_solid, width=2)
+        line.new(bar_index, entry_tp, bar_index + 10, entry_tp, color=color.green, style=line.style_solid, width=2)
+        line.new(bar_index, close, bar_index + 5, entry_tp, color=color.red, style=line.style_arrow_right)
+
