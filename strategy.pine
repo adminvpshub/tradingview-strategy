@@ -1,0 +1,29 @@
+//@version=5
+strategy("Simple Strategy Template", overlay=true, margin_long=100, margin_short=100)
+
+// Input parameters
+fastLength = input.int(14, minval=1, title="Fast Length")
+slowLength = input.int(28, minval=1, title="Slow Length")
+
+// Calculate Moving Averages
+fastMA = ta.sma(close, fastLength)
+slowMA = ta.sma(close, slowLength)
+
+// Plot Moving Averages
+plot(fastMA, color=color.blue, title="Fast SMA")
+plot(slowMA, color=color.orange, title="Slow SMA")
+
+// Trading Logic
+longCondition = ta.crossover(fastMA, slowMA)
+shortCondition = ta.crossunder(fastMA, slowMA)
+
+// Execute Strategy
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+// Visuals: Buy/Sell Labels
+plotshape(longCondition, title="Buy Label", text="BUY", style=shape.labelup, location=location.belowbar, color=color.green, textcolor=color.white, size=size.tiny)
+plotshape(shortCondition, title="Sell Label", text="SELL", style=shape.labeldown, location=location.abovebar, color=color.red, textcolor=color.white, size=size.tiny)
